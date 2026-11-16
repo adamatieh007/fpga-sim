@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System Architecture | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html" class="active">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>System Architecture</h1>
+  <p class="subtitle">Runtime containers, processes, interfaces, timing, and limits.</p>
+</header>
+
+<section>
+<h2>1. Container view</h2>
+<p>Three runtime containers: the browser application, the Python session server,
+and short-lived simulator processes. Temporary files live in a per-session working
+directory that is deleted on stop or disconnect.</p>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph B[&quot;Browser (any modern browser)&quot;]
+    direction TB
+    html[&quot;index.html + style.css&quot;]
+    app[&quot;app.js&lt;br/&gt;controller, run loop, WS client&quot;]
+    brd[&quot;board.js&lt;br/&gt;SVG board, input events&quot;]
+    wv[&quot;wave.js&lt;br/&gt;canvas viewer, VCD parser&quot;]
+    cm[&quot;CodeMirror 5&lt;br/&gt;(from CDN)&quot;]
+    app --- brd
+    app --- wv
+    app --- cm
+  end
+  subgraph S[&quot;Python process: server.py&quot;]
+    direction TB
+    http[&quot;aiohttp router&lt;br/&gt;GET / , /static/* , /ws&quot;]
+    sess[&quot;SimSession&lt;br/&gt;(1 per WebSocket)&quot;]
+    gen[&quot;hdl.py&lt;br/&gt;parse + generate wrapper&quot;]
+    http --&gt; sess
+    sess --&gt; gen
+  end
+  subgraph FS[&quot;Temp dir /tmp/fpgasim_XXXX&quot;]
+    f1[(&quot;design.vhd / design.sv&quot;)]
+    f2[(&quot;fpgasim_tb.vhd / .v&quot;)]
+    f3[(&quot;work library / sim.vvp&quot;)]
+    f4[(&quot;wave.vcd&quot;)]
+  end
+  subgraph P[&quot;Child processes&quot;]
+    c1[&quot;ghdl -a / -e&lt;br/&gt;iverilog&quot;]
+    c2[&quot;ghdl -r / vvp&lt;br/&gt;(long-running sim)&quot;]
+  end
+  B -- &quot;HTTP GET (static files)&quot; --&gt; http
+  app &lt;-- &quot;WebSocket JSON&quot; --&gt; sess
+  sess -- writes --&gt; f1 &amp; f2
+  sess -- spawns --&gt; c1
+  c1 -- produces --&gt; f3
+  sess -- &quot;spawns, pipes stdin/stdout/stderr&quot; --&gt; c2
+  c2 -- reads --&gt; f3
+  c2 -- &quot;writes (optional)&quot; --&gt; f4
+  sess -- &quot;reads on stop&quot; --&gt; f4
+</pre>
+<figcaption>Figure 5. Container view with files and processes.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>2. Process and concurrency model</h2>
+<ul>
+<li>A single Python process runs an asyncio event loop. Every browser tab opens one WebSocket and gets its own <code>SimSession</code>.</li>
+<li>Each session owns at most one live simulator process. Recompiling stops the old one first.</li>
+<li>Messages from a tab are handled strictly in order. A <code>step</code> awaits the simulator's <code>D</code> line before the next message is read, so steps never overlap.</li>
+<li>A background task per session pumps the simulator's <em>stderr</em> (VHDL <code>report</code>, assertion failures, runtime errors) to the Console tab.</li>
+</ul>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  loop([&quot;asyncio event loop&lt;br/&gt;(single thread)&quot;])
+  subgraph T1[&quot;Tab 1&quot;]
+    ws1[&quot;WebSocket handler&quot;] --&gt; s1[&quot;SimSession 1&quot;]
+    s1 --&gt; p1[&quot;sim process 1&quot;]
+    s1 --&gt; e1[&quot;stderr pump task 1&quot;]
+  end
+  subgraph T2[&quot;Tab 2&quot;]
+    ws2[&quot;WebSocket handler&quot;] --&gt; s2[&quot;SimSession 2&quot;]
+    s2 --&gt; p2[&quot;sim process 2&quot;]
+    s2 --&gt; e2[&quot;stderr pump task 2&quot;]
+  end
+  loop --&gt; ws1
+  loop --&gt; ws2
+</pre>
+<figcaption>Figure 6. Concurrency: one session and one simulator per tab, all on one event loop.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>3. External interfaces</h2>
+<table>
+<tr><th>Interface</th><th>Between</th><th>Format</th><th>Details</th></tr>
+<tr><td>HTTP</td><td>Browser &rarr; server</td><td>Static files</td><td><code>/</code> serves index.html, <code>/static/*</code> serves JS/CSS/examples</td></tr>
+<tr><td>WebSocket <code>/ws</code></td><td>Browser &harr; server</td><td>JSON text frames</td><td>See <a href="data-and-protocols.html">message catalog</a></td></tr>
+<tr><td>Compiler CLI</td><td>Server &rarr; GHDL / iverilog</td><td>argv, combined stdout+stderr</td><td>Exit code decides success; output shown in Console</td></tr>
+<tr><td>Simulator line protocol</td><td>Server &harr; ghdl -r / vvp</td><td>ASCII lines on stdin/stdout</td><td><code>S</code>, <code>Q</code> in; <code>O</code>, <code>F</code>, <code>D</code> out</td></tr>
+<tr><td>VCD file</td><td>Simulator &rarr; server &rarr; browser</td><td>IEEE 1364 VCD text</td><td>Sent whole in one <code>vcd</code> message when the sim stops</td></tr>
+<tr><td>localStorage</td><td>Browser</td><td>Key/value</td><td>Last language and code per language</td></tr>
+</table>
+</section>
+
+<section>
+<h2>4. Clock and time model</h2>
+<p>Real time, simulated cycles, and simulator time are three different clocks. The browser
+converts the chosen clock speed into a number of cycles owed, the server forwards them in
+batches, and the wrapper toggles <code>CLOCK_50</code> with a 20&nbsp;ns period.</p>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  rt[&quot;Wall clock&lt;br/&gt;browser tick every 16 ms&quot;] -- &quot;owed += speed x dt&lt;br/&gt;capped at speed/4&quot; --&gt; batch[&quot;Batch of N cycles&lt;br/&gt;N = floor(owed), max 250,000&quot;]
+  batch -- &quot;step message&quot; --&gt; srv[&quot;Server&lt;br/&gt;cycle counter += N&quot;]
+  srv -- &quot;S N sw key&quot; --&gt; tb[&quot;Wrapper process&lt;br/&gt;per cycle: clk=1 for 10 ns, clk=0 for 10 ns&quot;]
+  tb -- &quot;change at cycle k&quot; --&gt; map[&quot;Waveform time&lt;br/&gt;t = base + k - 0.5&quot;]
+</pre>
+<figcaption>Figure 7. From user-selected clock speed to simulated cycles to waveform time.</figcaption>
+</figure>
+
+<p>One simulated cycle is 20&nbsp;ns in VCD time (matching 50&nbsp;MHz), plus 1&nbsp;ns per batch
+for input settling. In the live waveform the time axis is in cycles, and the rising edge of
+cycle <em>k</em> is drawn at <code>base + k - 0.5</code>.</p>
+</section>
+
+<section>
+<h2>5. Limits and timeouts</h2>
+<table>
+<tr><th>Limit</th><th>Value</th><th>Where</th><th>Why</th></tr>
+<tr><td>Compile timeout</td><td>60 s</td><td>server.py <code>COMPILE_TIMEOUT</code></td><td>Stop runaway elaboration</td></tr>
+<tr><td>Step timeout</td><td>20 s</td><td>server.py <code>STEP_TIMEOUT</code></td><td>Detect hangs, kill process</td></tr>
+<tr><td>Max cycles per step (server)</td><td>5,000,000</td><td>server.py <code>MAX_CYCLES_PER_STEP</code></td><td>Bound a single request</td></tr>
+<tr><td>Max cycles per batch (client)</td><td>250,000</td><td>app.js <code>MAX_BATCH</code></td><td>Keep UI responsive</td></tr>
+<tr><td>Reported changes per batch</td><td>256</td><td>Wrapper <code>count &lt; 256</code></td><td>Bound message size</td></tr>
+<tr><td>VCD size sent to browser</td><td>40 MB</td><td>server.py <code>MAX_VCD_BYTES</code></td><td>Browser memory</td></tr>
+<tr><td>Live history per signal</td><td>200,000 transitions</td><td>app.js <code>MAX_HISTORY</code></td><td>Trim oldest 25% when exceeded</td></tr>
+<tr><td>WebSocket message size</td><td>8 MB inbound</td><td>aiohttp <code>max_msg_size</code></td><td>Large source files</td></tr>
+</table>
+</section>
+
+<section>
+<h2>6. Error handling</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  start([&quot;Error source&quot;]) --&gt; k{&quot;Which stage?&quot;}
+  k -- &quot;port parsing&quot; --&gt; e1[&quot;HDLError&lt;br/&gt;compile_error message&quot;]
+  k -- &quot;compiler exit code != 0&quot; --&gt; e2[&quot;compile_error + full output&lt;br/&gt;error lines highlighted&quot;]
+  k -- &quot;sim prints to stderr&quot; --&gt; e3[&quot;console level=sim&lt;br/&gt;(reports, assertions)&quot;]
+  k -- &quot;no D within 20 s&quot; --&gt; e4[&quot;sim_error: timeout&lt;br/&gt;process killed&quot;]
+  k -- &quot;stdout closed (EOF)&quot; --&gt; e5[&quot;sim_error: exited unexpectedly&lt;br/&gt;e.g. delta-cycle loop&quot;]
+  k -- &quot;WebSocket closed&quot; --&gt; e6[&quot;session.kill(), temp dir removed&lt;br/&gt;browser retries every 1.5 s&quot;]
+  e4 --&gt; ui[&quot;UI returns to not-loaded state&quot;]
+  e5 --&gt; ui
+</pre>
+<figcaption>Figure 8. Error categories and how each is surfaced.</figcaption>
+</figure>
+
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

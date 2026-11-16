@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html" class="active">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Overview</h1>
+  <p class="subtitle">What FPGASim is, how the pieces fit, and where to find each design view.</p>
+</header>
+
+<section>
+<h2>1. What FPGASim is</h2>
+<p>FPGASim lets students write VHDL or Verilog in a browser and watch it run on an
+animated <strong>Terasic DE2-115</strong> board (18 slide switches, 4 push buttons,
+18 red + 9 green LEDs, eight 7-segment displays, a 50&nbsp;MHz clock). It replaces the
+expensive physical board for learning and debugging, and adds things real hardware
+can't easily show: live waveforms, single-cycle stepping, and recording of every
+internal signal.</p>
+<p>The design compiles with real, open-source simulators (GHDL for VHDL, Icarus
+Verilog for Verilog), so the full languages are supported. A generated "board
+testbench" connects the student's top-level ports to the virtual board and streams
+values to the browser in real time.</p>
+</section>
+
+<section>
+<h2>2. Architecture at a glance</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  student([&quot;Student&quot;])
+  subgraph Browser[&quot;Web browser&quot;]
+    editor[&quot;Code editor&lt;br/&gt;(CodeMirror)&quot;]
+    board[&quot;Animated DE2-115&lt;br/&gt;(SVG)&quot;]
+    wave[&quot;Waveform viewer&lt;br/&gt;(Canvas)&quot;]
+  end
+  subgraph Server[&quot;server.py (Python, aiohttp)&quot;]
+    session[&quot;SimSession&lt;br/&gt;one per browser tab&quot;]
+    hdl[&quot;hdl.py&lt;br/&gt;port parser + wrapper generator&quot;]
+  end
+  subgraph Tools[&quot;Open-source HDL toolchain&quot;]
+    ghdl[&quot;GHDL&lt;br/&gt;VHDL&quot;]
+    iv[&quot;Icarus Verilog&lt;br/&gt;iverilog + vvp&quot;]
+  end
+  student --&gt; editor
+  student -- &quot;flip switches / press keys&quot; --&gt; board
+  editor -- &quot;code&quot; --&gt; session
+  board -- &quot;SW, KEY&quot; --&gt; session
+  session --&gt; hdl
+  session -- &quot;compile + run&lt;br/&gt;stdin/stdout&quot; --&gt; ghdl
+  session -- &quot;compile + run&lt;br/&gt;stdin/stdout&quot; --&gt; iv
+  session -- &quot;LED / HEX updates&quot; --&gt; board
+  session -- &quot;signal history, VCD&quot; --&gt; wave
+</pre>
+<figcaption>Figure 1. High-level view: browser UI, Python session server, and simulator processes.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>3. Document map</h2>
+<table>
+<tr><th>Document</th><th>Answers</th><th>Main diagrams</th></tr>
+<tr><td><a href="solution-architecture.html">Solution Architecture</a></td><td>Why this design? What problem, which options, which trade-offs?</td><td>Context, use cases, options, decision records</td></tr>
+<tr><td><a href="system-architecture.html">System Architecture</a></td><td>Which runtime parts exist and how do they connect?</td><td>Containers, process model, clock/time model</td></tr>
+<tr><td><a href="software-architecture.html">Software Architecture</a></td><td>How is the code organised inside each part?</td><td>Modules, classes, wrapper generation, run loop</td></tr>
+<tr><td><a href="runtime-flows.html">Runtime Flows</a></td><td>What happens, step by step, for each user action?</td><td>Sequence diagrams</td></tr>
+<tr><td><a href="data-and-protocols.html">Data &amp; Protocols</a></td><td>What exactly goes over the wire? What are the states?</td><td>Message catalog, state machines, data model</td></tr>
+<tr><td><a href="deployment.html">Deployment &amp; Security</a></td><td>How is it run locally, and how would it become a public website?</td><td>Deployment views, threat model, roadmap</td></tr>
+</table>
+</section>
+
+<section>
+<h2>4. Technology stack</h2>
+<table>
+<tr><th>Layer</th><th>Technology</th><th>Role</th></tr>
+<tr><td>Front end</td><td>HTML, CSS, vanilla JavaScript</td><td>UI with no build step</td></tr>
+<tr><td>Editor</td><td>CodeMirror 5 (CDN), textarea fallback</td><td>VHDL/Verilog syntax highlighting, error line marks</td></tr>
+<tr><td>Board</td><td>SVG generated in <code>board.js</code></td><td>Switches, keys, LEDs, 7-segment digits</td></tr>
+<tr><td>Waveforms</td><td>HTML5 Canvas in <code>wave.js</code></td><td>Live I/O traces and VCD viewer</td></tr>
+<tr><td>Transport</td><td>WebSocket (JSON messages)</td><td>Low-latency, bidirectional stepping</td></tr>
+<tr><td>Back end</td><td>Python 3.9+, aiohttp, asyncio</td><td>HTTP + WebSocket server, process control</td></tr>
+<tr><td>VHDL</td><td>GHDL (<code>--std=08 -fsynopsys</code>)</td><td>Analyse, elaborate, run, dump VCD</td></tr>
+<tr><td>Verilog / SV</td><td>Icarus Verilog (<code>-g2012</code>) + vvp</td><td>Compile and run, dump VCD</td></tr>
+</table>
+</section>
+
+<section>
+<h2>5. Glossary</h2>
+<dl>
+<dt>DUT</dt><dd>Device Under Test: the student's top-level entity/module.</dd>
+<dt>Wrapper / board testbench</dt><dd>Auto-generated HDL (<code>fpgasim_tb</code>) that instantiates the DUT, drives the clock and inputs, and prints outputs.</dd>
+<dt>Batch / step</dt><dd>One request to advance the simulation by N clock cycles with given switch/key values.</dd>
+<dt>VCD</dt><dd>Value Change Dump: a standard text file listing every signal change, viewable in GTKWave.</dd>
+<dt>Active low</dt><dd>A signal that means "on" when it is 0. DE2-115 keys and 7-segment segments are active low.</dd>
+<dt>Delta cycle</dt><dd>A zero-time simulation step used to settle combinational logic. Infinite delta loops indicate a combinational loop.</dd>
+</dl>
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

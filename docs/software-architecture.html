@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software Architecture | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html" class="active">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Software Architecture</h1>
+  <p class="subtitle">Code organisation, classes, and the main algorithms in each module.</p>
+</header>
+
+<section>
+<h2>1. Source tree and module dependencies</h2>
+<pre class="code">fpga-sim/
+  server.py              HTTP/WebSocket server, SimSession, compile/run/step/stop
+  hdl.py                 port parsing (VHDL + Verilog), top selection, wrapper generation
+  requirements.txt       aiohttp
+  static/
+    index.html           layout, toolbar, tabs
+    style.css            app + board styles
+    app.js               controller: editor, WS client, run loop, live waveform model
+    board.js             Board class: SVG drawing, input handling, output rendering
+    wave.js              WaveView class (canvas) + parseVCD()
+    examples/            counter.vhd/.v, blank.vhd/.v
+  docs/                  these design documents</pre>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph backend[&quot;Back end (Python)&quot;]
+    server[&quot;server.py&quot;] --&gt; hdl[&quot;hdl.py&quot;]
+    server --&gt; aiohttp[[&quot;aiohttp&quot;]]
+    server --&gt; asyncio[[&quot;asyncio / subprocess&quot;]]
+  end
+  subgraph frontend[&quot;Front end (JavaScript)&quot;]
+    index[&quot;index.html&quot;] --&gt; appjs[&quot;app.js&quot;]
+    index --&gt; boardjs[&quot;board.js&quot;]
+    index --&gt; wavejs[&quot;wave.js&quot;]
+    index --&gt; cmlib[[&quot;CodeMirror&quot;]]
+    appjs --&gt; boardjs
+    appjs --&gt; wavejs
+    appjs --&gt; cmlib
+  end
+  appjs -. &quot;WebSocket JSON&quot; .-&gt; server
+  server -. &quot;serves&quot; .-&gt; index
+</pre>
+<figcaption>Figure 9. Module dependencies. Double-bordered boxes are third-party libraries.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>2. Back-end class model</h2>
+<figure class="diagram">
+<pre class="mermaid">
+classDiagram
+  class SimSession {
+    -ws : WebSocketResponse
+    -proc : Process
+    -workdir : str
+    -lang : str
+    -record_vcd : bool
+    -cycle : int
+    -stderr_task : Task
+    +compile(msg)
+    +compile_vhdl(code, wrapper) bool
+    +compile_verilog(code, wrapper) bool
+    +start_sim()
+    +pump_stderr(proc)
+    +step(msg)
+    +stop(send_vcd)
+    +kill()
+    +send(**msg)
+    +log(text, level)
+  }
+  class Port {
+    +name : str
+    +direction : str
+    +width : int
+    +lo : int
+    +vtype : str
+    +scalar : bool
+    +canonical() str
+    +to_dict() dict
+  }
+  class HDLError {
+    &lt;&lt;exception&gt;&gt;
+  }
+  class hdl_module {
+    &lt;&lt;module&gt;&gt;
+    +BOARD_PORTS : dict
+    +OUTPUT_BITS = 83
+    +build_wrapper(lang, src, top)
+    +vhdl_entities(src)
+    +verilog_modules(src)
+    +choose_top(units, requested)
+    +gen_vhdl_wrapper(top, ports, warnings)
+    +gen_verilog_wrapper(top, ports, warnings)
+  }
+  class server_module {
+    &lt;&lt;module&gt;&gt;
+    +ws_handler(request)
+    +index(request)
+    +run_tool(args, cwd)
+    +tool_status()
+    +clean_bits(value, width, pad)
+    +main()
+  }
+  server_module ..&gt; SimSession : creates per socket
+  SimSession ..&gt; hdl_module : build_wrapper()
+  hdl_module ..&gt; Port : produces
+  hdl_module ..&gt; HDLError : raises
+</pre>
+<figcaption>Figure 10. Python classes and module-level functions.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>3. Front-end class model</h2>
+<figure class="diagram">
+<pre class="mermaid">
+classDiagram
+  class AppController {
+    &lt;&lt;app.js module&gt;&gt;
+    +state : object
+    +compile()
+    +onReady(msg)
+    +onOutput(msg)
+    +onVcd(text)
+    +tick()
+    +sendStep(n)
+    +toggleRun()
+    +stepOnce()
+    +stopSim()
+    +resetLive()
+    +pushTr(row, t, v)
+    +showWaveSource()
+  }
+  class Board {
+    +sw : string[18]
+    +key : string[4]
+    +keyLatched : bool[4]
+    +setSwitch(i, v)
+    +setKey(i, v)
+    +swString() string
+    +keyString() string
+    +setOutputs(bits)
+    +clearOutputs()
+    +setClockStatus(running, text)
+  }
+  class WaveView {
+    +rows : Row[]
+    +now : number
+    +unit : string
+    +t0 : number
+    +scale : number
+    +cursor : number
+    +follow : bool
+    +radix : string
+    +setModel(rows, unit, now)
+    +update(now)
+    +zoom(factor, x)
+    +zoomFit()
+    +draw()
+    -drawClock()
+    -drawBit()
+    -drawBus()
+    -segments(row, bit, ta, tb)
+  }
+  class Row {
+    +label : string
+    +width : int
+    +kind : string
+    +expanded : bool
+    +tr : Transition[]
+  }
+  class VcdParser {
+    &lt;&lt;function&gt;&gt;
+    +parseVCD(text) signals and end
+  }
+  AppController --&gt; Board : owns
+  AppController --&gt; WaveView : owns
+  WaveView o-- Row : displays
+  AppController ..&gt; VcdParser : on stop
+  VcdParser ..&gt; Row : creates
+</pre>
+<figcaption>Figure 11. JavaScript classes and the controller module.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>4. Wrapper generation pipeline (hdl.py)</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  src[&quot;Student source code&quot;] --&gt; strip[&quot;Strip comments&lt;br/&gt;(-- and /* */ for VHDL, // and /* */ for Verilog)&quot;]
+  strip --&gt; parse{&quot;Language?&quot;}
+  parse -- VHDL --&gt; pv[&quot;vhdl_entities()&lt;br/&gt;find entity ... port( ... )&lt;br/&gt;split on ; at depth 0&lt;br/&gt;read names : dir type(range)&quot;]
+  parse -- Verilog --&gt; pver{&quot;Directions in&lt;br/&gt;module header?&quot;}
+  pver -- &quot;yes (ANSI)&quot; --&gt; pa[&quot;parse_verilog_ansi()&lt;br/&gt;direction and width carry over&quot;]
+  pver -- &quot;no (Verilog-1995)&quot; --&gt; pn[&quot;parse_verilog_nonansi()&lt;br/&gt;read input/output decls in body&quot;]
+  pv --&gt; units[&quot;units = name to Port list&quot;]
+  pa --&gt; units
+  pn --&gt; units
+  units --&gt; top[&quot;choose_top()&lt;br/&gt;requested name, else most board pins&lt;br/&gt;(ties go to last)&quot;]
+  top --&gt; map[&quot;Map each port&lt;br/&gt;canonical(): SW, KEY, LEDR, LEDG,&lt;br/&gt;HEX0-7, CLOCK_50 (+ CLK aliases)&quot;]
+  map --&gt; chk{&quot;Board pin?&quot;}
+  chk -- &quot;yes&quot; --&gt; fit[&quot;Fit width (slice), convert type&lt;br/&gt;unsigned / signed / bit_vector&quot;]
+  chk -- &quot;no, input&quot; --&gt; tie[&quot;Tie to 0 + warning&quot;]
+  chk -- &quot;no, output&quot; --&gt; open[&quot;Leave open + warning&quot;]
+  fit --&gt; gen[&quot;Emit fpgasim_tb&lt;br/&gt;(VHDL or Verilog template)&quot;]
+  tie --&gt; gen
+  open --&gt; gen
+  gen --&gt; out[&quot;wrapper source + warnings&quot;]
+</pre>
+<figcaption>Figure 12. How the student's code is turned into a runnable board testbench.</figcaption>
+</figure>
+
+<h3>Structure of the generated testbench</h3>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph tb[&quot;fpgasim_tb (generated)&quot;]
+    direction LR
+    stdin[/&quot;stdin&lt;br/&gt;S n sw key&quot;/] --&gt; proc[&quot;board process&lt;br/&gt;read line, apply inputs,&lt;br/&gt;toggle clk n times,&lt;br/&gt;check() after each cycle&quot;]
+    proc -- &quot;clk_i&quot; --&gt; dut
+    proc -- &quot;sw_i[17:0], key_i[3:0]&quot; --&gt; dut
+    subgraph dut[&quot;dut : student&#x27;s top&quot;]
+      logic[&quot;student logic&quot;]
+    end
+    dut -- &quot;ledr_o, ledg_o, hex0_o..hex7_o&quot; --&gt; cat[&quot;concat to 83 bits&quot;]
+    cat --&gt; proc
+    proc --&gt; stdout[/&quot;stdout&lt;br/&gt;O k bits ... F n bits, D&quot;/]
+  end
+</pre>
+<figcaption>Figure 13. The DUT sits inside a generated testbench that speaks the line protocol.</figcaption>
+</figure>
+
+<p>Unused board outputs start at <code>'Z'</code>, so pins a design doesn't drive appear as
+"not connected" on the board instead of off. Keys default to <code>'1'</code> (released).</p>
+</section>
+
+<section>
+<h2>5. Front-end run loop (app.js <code>tick()</code>)</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  t([&quot;setInterval every 16 ms&quot;]) --&gt; dt[&quot;dt = time since last tick&quot;]
+  dt --&gt; loaded{&quot;Design loaded?&quot;}
+  loaded -- no --&gt; endn([&quot;return&quot;])
+  loaded -- yes --&gt; run{&quot;Running?&quot;}
+  run -- yes --&gt; owe[&quot;owed += speed x dt&lt;br/&gt;clamp owed to max(speed/4, 2)&quot;]
+  run -- no --&gt; wait
+  owe --&gt; wait{&quot;Step already&lt;br/&gt;in flight?&quot;}
+  wait -- yes --&gt; endn
+  wait -- no --&gt; n[&quot;if running: n = min(floor(owed), 250k)&lt;br/&gt;else n = 0, then owed -= n&quot;]
+  n --&gt; send{&quot;n &gt; 0 or&lt;br/&gt;inputs changed?&quot;}
+  send -- yes --&gt; step[&quot;sendStep(n)&lt;br/&gt;awaiting = true&quot;]
+  send -- no --&gt; rate
+  step --&gt; rate[&quot;once per second:&lt;br/&gt;update achieved Hz on board&quot;]
+  rate --&gt; endn
+</pre>
+<figcaption>Figure 14. The client-side scheduler that turns clock speed into step requests.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>6. Handling an <code>out</code> message</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  m([&quot;out: base, n, sw, key, changes, final&quot;]) --&gt; a[&quot;awaiting = false&quot;]
+  a --&gt; i[&quot;pushTr SW and KEY at t = base&quot;]
+  i --&gt; c{&quot;For each change k, bits&quot;}
+  c --&gt; tk[&quot;t = base if k = 0&lt;br/&gt;else base + k - 0.5&quot;]
+  tk --&gt; po[&quot;pushOutputs(t, bits)&lt;br/&gt;split into LEDR, LEDG, HEX0..7 rows&quot;]
+  po --&gt; c
+  c -- done --&gt; f{&quot;final differs from&lt;br/&gt;last pushed?&quot;}
+  f -- yes --&gt; pf[&quot;push final at base + n - 0.5&quot;]
+  f -- no --&gt; tr
+  pf --&gt; tr{&quot;256 changes reported?&quot;}
+  tr -- yes --&gt; sh[&quot;add shaded &#x27;truncated&#x27; range&quot;]
+  tr -- no --&gt; now
+  sh --&gt; now[&quot;now = base + n&lt;br/&gt;board.setOutputs(final)&lt;br/&gt;wave.update(now)&quot;]
+</pre>
+<figcaption>Figure 15. Turning a batch result into board state and waveform transitions.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>7. Waveform rendering</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  rows[&quot;Rows&lt;br/&gt;(live or VCD)&quot;] --&gt; vis[&quot;visibleRows()&lt;br/&gt;expand buses into bits&quot;]
+  vis --&gt; win[&quot;time window&lt;br/&gt;t0 to xToTime(width)&quot;]
+  win --&gt; seg[&quot;segments()&lt;br/&gt;binary search first transition,&lt;br/&gt;collect changes in window&quot;]
+  seg --&gt; kind{&quot;Row kind&quot;}
+  kind -- clock --&gt; ck[&quot;drawClock()&lt;br/&gt;square wave if 6+ px per cycle&lt;br/&gt;else shaded band&quot;]
+  kind -- &quot;1 bit&quot; --&gt; bit[&quot;drawBit()&lt;br/&gt;0/1 lines, Z yellow, X/U red box&quot;]
+  kind -- bus --&gt; bus[&quot;drawBus()&lt;br/&gt;hexagon cells + hex/dec/bin text&quot;]
+  ck --&gt; frame[&quot;requestAnimationFrame&lt;br/&gt;redraw only when dirty&quot;]
+  bit --&gt; frame
+  bus --&gt; frame
+</pre>
+<figcaption>Figure 16. Canvas rendering path. Only the visible time window is processed.</figcaption>
+</figure>
+
+<p>Interaction: mouse wheel zooms around the pointer, shift-wheel or drag pans, a click sets
+the cursor (values appear in the second column), and clicking a bus name toggles bit expansion.
+Follow mode keeps the newest cycle on screen during live runs.</p>
+</section>
+
+<section>
+<h2>8. VCD parsing</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  v[&quot;VCD text&quot;] --&gt; ts[&quot;read $timescale&lt;br/&gt;to ns factor&quot;]
+  ts --&gt; hd[&quot;header tokens until $enddefinitions&quot;]
+  hd --&gt; sc{&quot;token&quot;}
+  sc -- &quot;$scope&quot; --&gt; push[&quot;push scope name&quot;]
+  sc -- &quot;$upscope&quot; --&gt; pop[&quot;pop scope&quot;]
+  sc -- &quot;$var&quot; --&gt; var[&quot;create signal&lt;br/&gt;path, width, id&lt;br/&gt;(ids may alias)&quot;]
+  push --&gt; sc
+  pop --&gt; sc
+  var --&gt; sc
+  sc -- done --&gt; body[&quot;body lines&quot;]
+  body --&gt; l{&quot;line starts with&quot;}
+  l -- &quot;time marker&quot; --&gt; t[&quot;t = value x factor&quot;]
+  l -- &quot;b / r&quot; --&gt; vec[&quot;vector or real value + id&quot;]
+  l -- &quot;0 1 x z u ...&quot; --&gt; sca[&quot;scalar value + id&quot;]
+  vec --&gt; set[&quot;setVal: uppercase, left-pad,&lt;br/&gt;dedupe, push [t, v]&quot;]
+  sca --&gt; set
+</pre>
+<figcaption>Figure 17. parseVCD(): from file text to waveform rows.</figcaption>
+</figure>
+
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

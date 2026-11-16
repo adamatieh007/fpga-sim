@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data & Protocols | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html" class="active">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Data & Protocols</h1>
+  <p class="subtitle">Message formats, the simulator line protocol, bit layouts, and state machines.</p>
+</header>
+
+<section>
+<h2>1. WebSocket message catalog</h2>
+<h3>Browser &rarr; server</h3>
+<table>
+<tr><th>type</th><th>Fields</th><th>Meaning</th></tr>
+<tr><td><code>compile</code></td><td><code>lang</code> ("vhdl" | "verilog"), <code>code</code>, <code>top</code> (optional), <code>vcd</code> (bool)</td><td>Stop current sim, compile, start new sim</td></tr>
+<tr><td><code>step</code></td><td><code>n</code> (cycles, 0 allowed), <code>sw</code> (18 chars, SW17 first), <code>key</code> (4 chars, KEY3 first)</td><td>Apply inputs, run n cycles</td></tr>
+<tr><td><code>stop</code></td><td>&mdash;</td><td>End the sim; return VCD if recorded</td></tr>
+</table>
+<h3>Server &rarr; browser</h3>
+<table>
+<tr><th>type</th><th>Fields</th><th>Meaning</th></tr>
+<tr><td><code>hello</code></td><td><code>tools</code>: {ghdl, iverilog}</td><td>Sent on connect</td></tr>
+<tr><td><code>console</code></td><td><code>level</code> (info | warn | error | sim), <code>text</code></td><td>Log line for the Console tab</td></tr>
+<tr><td><code>compile_error</code></td><td><code>text</code>, <code>output</code> (optional)</td><td>Compile failed</td></tr>
+<tr><td><code>ready</code></td><td><code>top</code>, <code>ports</code>: [{name, dir, width, board}]</td><td>Simulator running</td></tr>
+<tr><td><code>out</code></td><td><code>base</code>, <code>n</code>, <code>sw</code>, <code>key</code>, <code>changes</code>: [[k, bits83]], <code>final</code>: bits83</td><td>Result of one step</td></tr>
+<tr><td><code>sim_error</code></td><td><code>text</code></td><td>Timeout, crash, or not running</td></tr>
+<tr><td><code>vcd</code></td><td><code>text</code></td><td>Recorded waveform file</td></tr>
+<tr><td><code>stopped</code></td><td>&mdash;</td><td>Simulation ended</td></tr>
+</table>
+<h3>Example exchange</h3>
+<pre class="code">&rarr; {"type":"step","n":60,"sw":"100000000000000101","key":"1111"}
+&larr; {"type":"out","base":2,"n":60,"sw":"100000000000000101","key":"1111",
+     "changes":[[23,"1000...0010010..."],[48,"1000...1001001..."]],
+     "final":"1000...1001001..."}</pre>
+</section>
+
+<section>
+<h2>2. Simulator line protocol</h2>
+<table>
+<tr><th>Direction</th><th>Line</th><th>Meaning</th></tr>
+<tr><td>server &rarr; sim</td><td><code>S &lt;n&gt; &lt;sw18&gt; &lt;key4&gt;</code></td><td>Set inputs, wait 1&nbsp;ns, check, then run n cycles</td></tr>
+<tr><td>server &rarr; sim</td><td><code>Q</code></td><td>Quit cleanly (flushes VCD)</td></tr>
+<tr><td>sim &rarr; server</td><td><code>O &lt;k&gt; &lt;bits83&gt;</code></td><td>Outputs changed after cycle k (k = 0 means after inputs applied)</td></tr>
+<tr><td>sim &rarr; server</td><td><code>F &lt;n&gt; &lt;bits83&gt;</code></td><td>Final outputs of this batch</td></tr>
+<tr><td>sim &rarr; server</td><td><code>D</code></td><td>Batch done</td></tr>
+<tr><td>sim &rarr; server</td><td>anything else</td><td>Forwarded to Console (e.g. <code>$display</code>)</td></tr>
+</table>
+<figure class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; WaitLine
+  WaitLine --&gt; Quit : Q or EOF
+  WaitLine --&gt; Apply : S n sw key
+  Apply --&gt; Settle : drive sw_i, key_i
+  Settle --&gt; Check0 : wait 1 ns
+  Check0 --&gt; Cycle : emit O 0 if changed
+  Cycle --&gt; Cycle : i less than n, clk high 10 ns, low 10 ns, check(i)
+  Cycle --&gt; Final : i equals n
+  Final --&gt; WaitLine : emit F, D and flush
+  Quit --&gt; [*] : finish
+</pre>
+<figcaption>Figure 26. Wrapper testbench behaviour as a state machine.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>3. Output bit layout (83 bits)</h2>
+<p>All outputs are concatenated MSB first. HEX bit <em>i</em> drives segment <em>i</em>
+(0 = a ... 6 = g) and is lit when 0.</p>
+<table class="bits">
+<tr><th>Chars</th><td>0&ndash;17</td><td>18&ndash;26</td><td>27&ndash;33</td><td>34&ndash;40</td><td>41&ndash;47</td><td>48&ndash;54</td><td>55&ndash;61</td><td>62&ndash;68</td><td>69&ndash;75</td><td>76&ndash;82</td></tr>
+<tr><th>Signal</th><td>LEDR[17:0]</td><td>LEDG[8:0]</td><td>HEX0[6:0]</td><td>HEX1</td><td>HEX2</td><td>HEX3</td><td>HEX4</td><td>HEX5</td><td>HEX6</td><td>HEX7</td></tr>
+</table>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph seg[&quot;7-segment digit (active low)&quot;]
+    a[&quot;bit 0 = a (top)&quot;]
+    b[&quot;bit 1 = b (top right)&quot;]
+    c[&quot;bit 2 = c (bottom right)&quot;]
+    d[&quot;bit 3 = d (bottom)&quot;]
+    e[&quot;bit 4 = e (bottom left)&quot;]
+    f[&quot;bit 5 = f (top left)&quot;]
+    g[&quot;bit 6 = g (middle)&quot;]
+  end
+  v[&quot;Value char per bit&quot;] --&gt; r1[&quot;0 or L: segment ON (red)&quot;]
+  v --&gt; r2[&quot;1 or H: segment off&quot;]
+  v --&gt; r3[&quot;Z: not driven (dark)&quot;]
+  v --&gt; r4[&quot;X, U, W, -: undefined (yellow)&quot;]
+</pre>
+<figcaption>Figure 27. Segment mapping and how each std_logic value is drawn.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>4. Client application states</h2>
+<figure class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; Disconnected
+  Disconnected --&gt; Idle : WebSocket open / hello
+  Idle --&gt; Compiling : compile()
+  Compiling --&gt; Idle : compile_error
+  Compiling --&gt; Running : ready
+  Running --&gt; Paused : Pause
+  Paused --&gt; Running : Run
+  Paused --&gt; Paused : Step or input change
+  Running --&gt; Stopping : Stop
+  Paused --&gt; Stopping : Stop
+  Running --&gt; Idle : sim_error
+  Paused --&gt; Idle : sim_error
+  Stopping --&gt; Reviewing : vcd received
+  Stopping --&gt; Idle : stopped (no VCD)
+  Reviewing --&gt; Compiling : compile()
+  Idle --&gt; Disconnected : socket closed
+  Running --&gt; Disconnected : socket closed
+  Paused --&gt; Disconnected : socket closed
+</pre>
+<figcaption>Figure 28. UI state machine. Buttons are enabled from these states in updateButtons().</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>5. Server session states</h2>
+<figure class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; NoProcess
+  NoProcess --&gt; Building : compile
+  Building --&gt; NoProcess : HDLError or compiler failure
+  Building --&gt; Simulating : start_sim()
+  Simulating --&gt; Simulating : step (await D)
+  Simulating --&gt; Flushing : stop (send Q)
+  Flushing --&gt; NoProcess : exit, send VCD, rm temp dir
+  Simulating --&gt; NoProcess : timeout or EOF, kill()
+  Simulating --&gt; Building : compile (stops old sim first)
+  NoProcess --&gt; [*] : socket closed
+  Simulating --&gt; [*] : socket closed, kill()
+</pre>
+<figcaption>Figure 29. Lifecycle of a SimSession and its simulator process.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>6. Push-button behaviour</h2>
+<figure class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --&gt; Released
+  Released --&gt; Pressed : pointer down
+  Pressed --&gt; Released : pointer up or leave
+  Released --&gt; Latched : shift + click
+  Latched --&gt; Released : shift + click
+  note right of Pressed : KEY bit = 0 (active low)
+  note right of Latched : KEY bit = 0, yellow ring
+</pre>
+<figcaption>Figure 30. KEY input states, including shift-click latching.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>7. Live waveform data model</h2>
+<figure class="diagram">
+<pre class="mermaid">
+erDiagram
+  WAVEFORM_MODEL ||--|{ ROW : contains
+  WAVEFORM_MODEL ||--o{ TRUNCATED_RANGE : marks
+  ROW ||--o{ TRANSITION : has
+  ROW ||--o{ BIT_VIEW : &quot;expands into&quot;
+  WAVEFORM_MODEL {
+    string unit &quot;cycle or ns&quot;
+    float now &quot;latest time&quot;
+  }
+  ROW {
+    string label &quot;SW, KEY, LEDR, LEDG, HEX0-7, CLOCK_50&quot;
+    int width
+    string kind &quot;clock or signal&quot;
+    bool expanded
+  }
+  TRANSITION {
+    float t &quot;base + k - 0.5&quot;
+    string value &quot;MSB-first bits&quot;
+  }
+  TRUNCATED_RANGE {
+    float start
+    float end
+  }
+  BIT_VIEW {
+    int bit &quot;derived on draw&quot;
+  }
+</pre>
+<figcaption>Figure 31. In-memory model behind the waveform viewer.</figcaption>
+</figure>
+
+<p>Transitions are appended only when the value changes. If two arrive at the same time the
+later one replaces the earlier. Each row keeps up to 200,000 transitions, dropping the oldest
+quarter when full. VCD rows use the same shape, with time in nanoseconds.</p>
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

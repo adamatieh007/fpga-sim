@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime Flows | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html" class="active">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Runtime Flows</h1>
+  <p class="subtitle">Step-by-step sequence diagrams for every main user action and failure.</p>
+</header>
+
+<section>
+<h2>1. Page load and connection</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Student
+  participant B as Browser (app.js)
+  participant CDN as CDN
+  participant S as server.py
+  U-&gt;&gt;B: open http://localhost:8080
+  B-&gt;&gt;S: GET /
+  S--&gt;&gt;B: index.html
+  B-&gt;&gt;S: GET /static/*.js, style.css
+  B-&gt;&gt;CDN: GET CodeMirror scripts
+  alt CDN reachable
+    CDN--&gt;&gt;B: editor scripts
+  else offline
+    B-&gt;&gt;B: fall back to plain textarea
+  end
+  B-&gt;&gt;B: restore language and code from localStorage
+  B-&gt;&gt;S: WebSocket /ws
+  S-&gt;&gt;S: new SimSession
+  S--&gt;&gt;B: hello (tools found)
+  B-&gt;&gt;U: status &quot;connected&quot;
+</pre>
+<figcaption>Figure 18. Loading the page and opening the WebSocket.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>2. Compile and load (success)</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Student
+  participant B as Browser
+  participant S as SimSession
+  participant H as hdl.py
+  participant C as Compiler
+  participant P as Sim process
+  U-&gt;&gt;B: Compile and Load (Ctrl+Enter)
+  B-&gt;&gt;B: clear console, reset board and live waveform
+  B-&gt;&gt;S: compile (lang, code, top, vcd)
+  S-&gt;&gt;S: stop any previous simulation
+  S-&gt;&gt;H: build_wrapper(lang, code, top)
+  H--&gt;&gt;S: top, ports, wrapper, warnings
+  S--&gt;&gt;B: console: Top-level and warnings
+  S-&gt;&gt;S: mkdtemp, write design + wrapper
+  alt VHDL
+    S-&gt;&gt;C: ghdl -a design.vhd
+    S-&gt;&gt;C: ghdl -a fpgasim_tb.vhd
+    S-&gt;&gt;C: ghdl -e fpgasim_tb
+  else Verilog
+    S-&gt;&gt;C: iverilog -g2012 -s fpgasim_tb
+  end
+  C--&gt;&gt;S: exit 0
+  S-&gt;&gt;P: spawn ghdl -r or vvp (pipes)
+  S--&gt;&gt;B: ready (top, ports)
+  B-&gt;&gt;B: loaded = true, running = true
+  B-&gt;&gt;S: step n=0 (initial inputs)
+  S-&gt;&gt;P: S 0 sw key
+  P--&gt;&gt;S: O 0 bits, F 0 bits, D
+  S--&gt;&gt;B: out
+  B-&gt;&gt;U: board shows initial outputs
+</pre>
+<figcaption>Figure 19. The happy path from button press to a running board.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>3. Compile error</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant S as SimSession
+  participant C as Compiler
+  B-&gt;&gt;S: compile
+  S-&gt;&gt;C: ghdl -a design.vhd
+  C--&gt;&gt;S: exit 1 + &quot;design.vhd:32:3:error: ...&quot;
+  S--&gt;&gt;B: console (level error, full output)
+  S--&gt;&gt;B: compile_error &quot;Compilation failed in your design.&quot;
+  B-&gt;&gt;B: parse &quot;design.vhd:LINE&quot; in each line
+  B-&gt;&gt;B: highlight error lines in editor
+  B-&gt;&gt;B: switch to Console tab, status &quot;compile failed&quot;
+  Note over B: clicking a console line jumps to that line
+</pre>
+<figcaption>Figure 20. How compiler errors reach the editor.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>4. Free-running clock</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant T as tick() every 16 ms
+  participant B as app.js
+  participant S as SimSession
+  participant P as Sim process
+  loop while running
+    T-&gt;&gt;B: owed += speed x dt
+    alt no step in flight and owed &gt;= 1
+      B-&gt;&gt;S: step n=floor(owed), sw, key
+      S-&gt;&gt;P: S n sw key
+      loop each cycle i = 1..n
+        P-&gt;&gt;P: clk 1 for 10 ns, clk 0 for 10 ns, check(i)
+      end
+      P--&gt;&gt;S: O k bits (only on change, max 256)
+      P--&gt;&gt;S: F n bits
+      P--&gt;&gt;S: D
+      S-&gt;&gt;S: cycle += n
+      S--&gt;&gt;B: out (base, n, changes, final)
+      B-&gt;&gt;B: update board, waveform, stats
+    else step still in flight
+      B-&gt;&gt;B: keep accumulating (capped)
+    end
+  end
+</pre>
+<figcaption>Figure 21. Steady-state stepping with one batch in flight.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>5. Input change while paused, and single step</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Student
+  participant Bd as Board (board.js)
+  participant B as app.js
+  participant S as SimSession
+  participant P as Sim process
+  U-&gt;&gt;Bd: click SW3
+  Bd-&gt;&gt;Bd: move knob, sw[3] = 1
+  Bd-&gt;&gt;B: onInputChange()
+  B-&gt;&gt;B: inputsDirty = true
+  B-&gt;&gt;S: step n=0 (next tick)
+  S-&gt;&gt;P: S 0 sw key
+  P--&gt;&gt;S: O 0 bits, F 0 bits, D
+  S--&gt;&gt;B: out
+  B-&gt;&gt;Bd: setOutputs (combinational result)
+  U-&gt;&gt;B: press Step (N = 1)
+  B-&gt;&gt;S: step n=1
+  S-&gt;&gt;P: S 1 sw key
+  P--&gt;&gt;S: O 1 bits, F 1 bits, D
+  S--&gt;&gt;B: out
+  B-&gt;&gt;Bd: setOutputs (after one rising edge)
+</pre>
+<figcaption>Figure 22. Combinational updates with zero cycles, then a single clock edge.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>6. Stop with internal-signal recording</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  actor U as Student
+  participant B as Browser
+  participant S as SimSession
+  participant P as Sim process
+  participant FS as Temp dir
+  U-&gt;&gt;B: Stop
+  B-&gt;&gt;S: stop
+  S-&gt;&gt;P: Q (then close stdin)
+  P-&gt;&gt;FS: flush and close wave.vcd
+  P--&gt;&gt;S: process exits
+  S-&gt;&gt;FS: read wave.vcd (if 40 MB or less)
+  S--&gt;&gt;B: vcd (text)
+  S-&gt;&gt;FS: delete temp dir
+  S--&gt;&gt;B: stopped
+  B-&gt;&gt;B: parseVCD, select signals under dut
+  B-&gt;&gt;U: Waveform shows &quot;Recorded: all signals&quot;
+  U-&gt;&gt;B: Signals..., Download .vcd
+</pre>
+<figcaption>Figure 23. Ending a run and loading the recorded waveform.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>7. Failure: hang or crash</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant S as SimSession
+  participant P as Sim process
+  B-&gt;&gt;S: step n
+  S-&gt;&gt;P: S n sw key
+  alt simulator detects delta-cycle loop
+    P--&gt;&gt;S: stderr message, then exit
+    S--&gt;&gt;B: console (level sim)
+    S--&gt;&gt;B: sim_error &quot;Simulator exited unexpectedly&quot;
+  else no D within 20 s
+    S-&gt;&gt;P: kill
+    S--&gt;&gt;B: sim_error &quot;did not respond within 20 s&quot;
+  end
+  B-&gt;&gt;B: loaded = false, buttons disabled
+  Note over B,S: user fixes code and recompiles
+</pre>
+<figcaption>Figure 24. How runaway or crashing designs are contained.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>8. Disconnect and reconnect</h2>
+<figure class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant S as server.py
+  participant P as Sim process
+  Note over S: server stopped or tab network drop
+  S--xB: WebSocket closed
+  S-&gt;&gt;P: kill (finally block)
+  S-&gt;&gt;S: remove temp dir
+  B-&gt;&gt;B: status &quot;disconnected&quot;, retry in 1.5 s
+  loop until server is back
+    B-&gt;&gt;S: WebSocket /ws
+  end
+  S--&gt;&gt;B: hello
+  Note over B: code kept in editor and localStorage, user recompiles
+</pre>
+<figcaption>Figure 25. Cleanup and automatic reconnection.</figcaption>
+</figure>
+
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

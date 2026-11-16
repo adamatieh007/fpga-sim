@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deployment & Security | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html" class="active">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Deployment & Security</h1>
+  <p class="subtitle">Running locally today, and the path to a safe public website.</p>
+</header>
+
+<section>
+<h2>1. Current deployment: local machine</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph laptop[&quot;Student laptop (Linux, macOS, or Windows + WSL)&quot;]
+    subgraph br[&quot;Browser&quot;]
+      ui[&quot;FPGASim UI&lt;br/&gt;http://localhost:8080&quot;]
+    end
+    subgraph py[&quot;Python 3.9+ venv&quot;]
+      srv[&quot;server.py&lt;br/&gt;bind 127.0.0.1:8080&quot;]
+    end
+    subgraph tools[&quot;Installed toolchain&quot;]
+      g[&quot;ghdl&quot;]
+      i[&quot;iverilog, vvp&quot;]
+    end
+    tmp[(&quot;/tmp/fpgasim_*&quot;)]
+    ui &lt;-- &quot;HTTP + WS (loopback)&quot; --&gt; srv
+    srv --&gt; g &amp; i
+    srv --&gt; tmp
+  end
+  cdn[&quot;cdnjs / jsdelivr&quot;]
+  ui -- &quot;HTTPS (editor assets)&quot; --&gt; cdn
+</pre>
+<figcaption>Figure 32. Everything runs on the student's own machine. Only editor assets come from a CDN.</figcaption>
+</figure>
+
+<table>
+<tr><th>OS</th><th>Python deps</th><th>VHDL</th><th>Verilog</th></tr>
+<tr><td>Ubuntu / Debian / WSL</td><td><code>pip install -r requirements.txt</code></td><td><code>apt install ghdl</code></td><td><code>apt install iverilog</code></td></tr>
+<tr><td>Fedora</td><td>same</td><td><code>dnf install ghdl</code></td><td><code>dnf install iverilog</code></td></tr>
+<tr><td>macOS</td><td>same</td><td>GHDL release tarball + <code>xattr</code> + PATH</td><td><code>brew install icarus-verilog</code></td></tr>
+</table>
+</section>
+
+<section>
+<h2>2. Target deployment: hosted website (server-side, Option B)</h2>
+<p>Running arbitrary student code on a shared server requires isolation. Each compile and
+run happens inside a disposable, locked-down container.</p>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  users([&quot;Students&quot;]) -- HTTPS --&gt; cdnw[&quot;CDN + static hosting&lt;br/&gt;index.html, JS, CSS&quot;]
+  users -- &quot;WSS&quot; --&gt; lb[&quot;Load balancer&lt;br/&gt;TLS, sticky sessions&quot;]
+  lb --&gt; api1[&quot;API node 1&lt;br/&gt;server.py + auth&quot;]
+  lb --&gt; api2[&quot;API node 2&lt;br/&gt;server.py + auth&quot;]
+  api1 --&gt; auth[(&quot;User DB&lt;br/&gt;projects, quotas&quot;)]
+  api2 --&gt; auth
+  api1 -- &quot;create, attach stdio&quot; --&gt; pool
+  api2 -- &quot;create, attach stdio&quot; --&gt; pool
+  subgraph pool[&quot;Sandbox runner pool&quot;]
+    s1[&quot;container&lt;br/&gt;ghdl + iverilog&lt;br/&gt;no network, read-only FS,&lt;br/&gt;1 CPU, 256 MB, 5 min&quot;]
+    s2[&quot;container&quot;]
+    s3[&quot;container&quot;]
+  end
+  api1 --&gt; obj[(&quot;Object storage&lt;br/&gt;VCD files&quot;)]
+  api2 --&gt; obj
+  mon[&quot;Metrics + logs&quot;] -.-&gt; api1 &amp; api2 &amp; pool
+</pre>
+<figcaption>Figure 33. Hosted architecture with per-session sandboxes.</figcaption>
+</figure>
+
+<h3>Required changes from v1</h3>
+<ul>
+<li>Replace <code>asyncio.create_subprocess_exec</code> with a container runner (Docker/gVisor/Firecracker) using <code>--network none</code>, a read-only root, a tmpfs work dir, CPU/memory/PID limits, and a wall-clock limit.</li>
+<li>Add authentication, per-user rate limits (compiles per minute, cycles per minute), and a cap on concurrent sessions.</li>
+<li>Serve front-end assets from static hosting; switch WebSocket URL to <code>wss://</code> (already automatic in <code>app.js</code>).</li>
+<li>Stream VCDs to object storage and give the browser a download link rather than sending 40&nbsp;MB over the socket.</li>
+<li>Persist projects (source, settings) per user.</li>
+</ul>
+</section>
+
+<section>
+<h2>3. Alternative: fully in-browser (Option C)</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  user([&quot;Student&quot;]) --&gt; page[&quot;Static site&lt;br/&gt;(GitHub Pages)&quot;]
+  subgraph browser[&quot;Browser tab&quot;]
+    ui2[&quot;UI (same board.js, wave.js)&quot;]
+    worker[&quot;Web Worker&quot;]
+    wasm[&quot;Simulator compiled to WASM&lt;br/&gt;Icarus / Verilator / Yosys + JS netlist sim&quot;]
+    ui2 &lt;-- &quot;postMessage&lt;br/&gt;same step/out messages&quot; --&gt; worker
+    worker --&gt; wasm
+  end
+  page --&gt; browser
+</pre>
+<figcaption>Figure 34. Static-site variant: the WebSocket is replaced by a Web Worker speaking the same messages.</figcaption>
+</figure>
+
+<p>Because the front end already speaks a small message protocol, the transport can be swapped
+for a Web Worker without changing <code>board.js</code> or <code>wave.js</code>.</p>
+</section>
+
+<section>
+<h2>4. Threat model</h2>
+<table>
+<tr><th>Threat</th><th>Local v1</th><th>Hosted mitigation</th></tr>
+<tr><td>Malicious HDL reads/writes host files (VHDL textio, Verilog <code>$fopen</code>, <code>$system</code>)</td><td>Runs as the user, who wrote the code; server binds to localhost only</td><td>Sandbox with read-only FS, tmpfs work dir, no secrets mounted</td></tr>
+<tr><td>Infinite loops or huge memory use</td><td>Step/compile timeouts, kill</td><td>cgroup CPU/memory/PID limits, wall-clock kill</td></tr>
+<tr><td>Disk filling via VCD</td><td>40&nbsp;MB send cap (file can still grow)</td><td>tmpfs size limit, VCD size cap enforced by runner</td></tr>
+<tr><td>Network exfiltration from simulator</td><td>N/A (local)</td><td><code>--network none</code></td></tr>
+<tr><td>Cross-site WebSocket hijacking</td><td>Low risk on loopback</td><td>Check <code>Origin</code> header, auth tokens</td></tr>
+<tr><td>Denial of service (many tabs / users)</td><td>Single user</td><td>Per-user quotas, session caps, autoscaling runner pool</td></tr>
+<tr><td>Supply chain (CDN scripts)</td><td>CodeMirror from cdnjs</td><td>Self-host or add Subresource Integrity hashes</td></tr>
+</table>
+</section>
+
+<section>
+<h2>5. Roadmap</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  v1[&quot;v1 (now)&lt;br/&gt;Local app&lt;br/&gt;DE2-115, VHDL + Verilog&lt;br/&gt;live waves, VCD&quot;]
+  v11[&quot;v1.1&lt;br/&gt;Multiple files / tabs&lt;br/&gt;Board picker: DE10-Lite, DE1-SoC&lt;br/&gt;Keyboard shortcuts for SW/KEY&quot;]
+  v12[&quot;v1.2&lt;br/&gt;VGA output canvas&lt;br/&gt;UART terminal&lt;br/&gt;Live internal signal watch&quot;]
+  v2[&quot;v2&lt;br/&gt;Hosted website&lt;br/&gt;sandboxed runners, accounts,&lt;br/&gt;saved projects&quot;]
+  v3[&quot;v3&lt;br/&gt;In-browser WASM engine&lt;br/&gt;offline mode&lt;br/&gt;shareable links&quot;]
+  v1 --&gt; v11 --&gt; v12 --&gt; v2 --&gt; v3
+</pre>
+<figcaption>Figure 35. Planned evolution.</figcaption>
+</figure>
+
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solution Architecture | FPGASim Design Docs</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="brand">FPGA<span>Sim</span><small>Design Docs</small></div>
+  <a href="index.html">Overview</a>
+  <a href="solution-architecture.html" class="active">Solution Architecture</a>
+  <a href="system-architecture.html">System Architecture</a>
+  <a href="software-architecture.html">Software Architecture</a>
+  <a href="runtime-flows.html">Runtime Flows</a>
+  <a href="data-and-protocols.html">Data & Protocols</a>
+  <a href="deployment.html">Deployment & Security</a>
+  <div class="meta">Version 1.0 &middot; Nov 2026</div>
+</nav>
+<main>
+<header>
+  <h1>Solution Architecture</h1>
+  <p class="subtitle">The problem, the options, and the key decisions behind the design.</p>
+</header>
+
+<section>
+<h2>1. Problem statement</h2>
+<p>Digital-logic courses test Verilog/VHDL on FPGA boards. Commercial boards such as the
+DE2-115 cost several hundred dollars, so students rarely own one and lab time is limited.
+Text-only simulators exist, but they don't give the tactile "flip a switch, see an LED"
+loop that makes hardware intuitive, and waveform tools like GTKWave have a steep learning curve.</p>
+<p><strong>Goal:</strong> a free tool where a student writes HDL, presses one button, and
+interacts with a realistic virtual board, with debugging views built in.</p>
+</section>
+
+<section>
+<h2>2. Goals and non-goals</h2>
+<div class="two-col">
+<div><h3>Goals</h3><ul>
+<li>Full VHDL-2008 and Verilog/SystemVerilog language support</li>
+<li>Pin names identical to the real DE2-115 so lab code works unchanged</li>
+<li>Interactive inputs (switches, momentary and latched keys)</li>
+<li>Live waveform of all board I/O, plus a full internal-signal recording</li>
+<li>Run locally with one command; path to a hosted website later</li>
+<li>Clear errors: highlighted lines, undefined (X/U) values flagged on the board</li>
+</ul></div>
+<div><h3>Non-goals (v1)</h3><ul>
+<li>Synthesis, timing analysis, or bitstream generation</li>
+<li>Real-time 50&nbsp;MHz simulation</li>
+<li>Peripherals beyond switches/keys/LEDs/HEX (VGA, SDRAM, UART, audio)</li>
+<li>Multi-user accounts and project storage</li>
+<li>Gate-level or analog accuracy</li>
+</ul></div>
+</div>
+</section>
+
+<section>
+<h2>3. Stakeholders and use cases</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  S([&quot;Student&quot;])
+  I([&quot;Instructor / IA&quot;])
+  D([&quot;Developer&lt;br/&gt;(maintainer)&quot;])
+  subgraph UC[&quot;FPGASim use cases&quot;]
+    U1(&quot;Write HDL in browser&quot;)
+    U2(&quot;Compile and see errors&quot;)
+    U3(&quot;Interact with virtual board&quot;)
+    U4(&quot;Pause, step, change clock speed&quot;)
+    U5(&quot;Inspect live I/O waveform&quot;)
+    U6(&quot;Record and browse internal signals&quot;)
+    U7(&quot;Export VCD for GTKWave&quot;)
+    U8(&quot;Load example / template&quot;)
+    U9(&quot;Demo a concept in lecture&quot;)
+    U10(&quot;Add board or feature&quot;)
+  end
+  S --&gt; U1 &amp; U2 &amp; U3 &amp; U4 &amp; U5 &amp; U6 &amp; U7 &amp; U8
+  I --&gt; U8 &amp; U9 &amp; U3
+  D --&gt; U10
+</pre>
+<figcaption>Figure 2. Actors and the use cases the system supports.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>4. System context</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  student([&quot;Student&lt;br/&gt;[person]&quot;])
+  subgraph boundary[&quot;FPGASim system boundary&quot;]
+    fpgasim[&quot;FPGASim&lt;br/&gt;[web app + local server]&lt;br/&gt;Edits, compiles and simulates HDL&lt;br/&gt;on a virtual DE2-115&quot;]
+  end
+  cdn[&quot;CDN&lt;br/&gt;[external]&lt;br/&gt;CodeMirror and Mermaid scripts&quot;]
+  tools[&quot;GHDL / Icarus Verilog&lt;br/&gt;[external software]&lt;br/&gt;Installed on the host&quot;]
+  gtk[&quot;GTKWave&lt;br/&gt;[optional external tool]&quot;]
+  realboard[&quot;Real DE2-115 + Quartus&lt;br/&gt;[out of scope]&quot;]
+  student -- &quot;uses via browser&quot; --&gt; fpgasim
+  fpgasim -- &quot;loads editor assets (HTTPS)&quot; --&gt; cdn
+  fpgasim -- &quot;spawns as subprocesses&quot; --&gt; tools
+  fpgasim -. &quot;exports wave.vcd&quot; .-&gt; gtk
+  student -. &quot;same source code later&quot; .-&gt; realboard
+</pre>
+<figcaption>Figure 3. System context: what FPGASim depends on and who uses it.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>5. Options considered</h2>
+<table>
+<tr><th>Option</th><th>How it works</th><th>Pros</th><th>Cons</th><th>Verdict</th></tr>
+<tr><td>A. Write our own HDL interpreter in JavaScript</td><td>Parse and evaluate a subset of Verilog/VHDL in the browser</td><td>No install, static hosting</td><td>Huge effort; only a toy subset; behaviour differs from real tools</td><td>Rejected</td></tr>
+<tr><td><strong>B. Real simulators driven by a server</strong></td><td>Python server compiles with GHDL/Icarus, runs the sim as a subprocess, streams I/O over WebSocket</td><td>Complete language support, real error messages, quick to build</td><td>Needs install locally; hosting needs sandboxing</td><td><strong>Chosen for v1</strong></td></tr>
+<tr><td>C. Simulators compiled to WebAssembly</td><td>Icarus/Verilator/Yosys in WASM, all in browser</td><td>Free static hosting, no server risk</td><td>Complex toolchain porting; VHDL support weak</td><td>Future option</td></tr>
+<tr><td>D. Synthesize with Yosys, simulate netlist in JS</td><td>Netlist evaluated by a JS gate engine</td><td>Fast, cycle-accurate to synthesized logic</td><td>Loses non-synthesizable code (reports, initial values), VHDL needs plugin</td><td>Future option</td></tr>
+</table>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TD
+  q1{&quot;Need full VHDL and Verilog&lt;br/&gt;language support?&quot;}
+  q2{&quot;Need zero install and&lt;br/&gt;free static hosting now?&quot;}
+  q3{&quot;Willing to port simulators&lt;br/&gt;to WebAssembly?&quot;}
+  A[&quot;Option A&lt;br/&gt;own JS interpreter&quot;]
+  B[&quot;Option B&lt;br/&gt;server + real simulators&quot;]
+  C[&quot;Option C&lt;br/&gt;WASM simulators&quot;]
+  q1 -- &quot;no, subset ok&quot; --&gt; A
+  q1 -- yes --&gt; q2
+  q2 -- &quot;no, local first&quot; --&gt; B
+  q2 -- yes --&gt; q3
+  q3 -- yes --&gt; C
+  q3 -- &quot;not yet&quot; --&gt; B
+  style B fill:#d8f5e3,stroke:#2e8b57,stroke-width:2px
+</pre>
+<figcaption>Figure 4. Decision tree that led to Option B.</figcaption>
+</figure>
+
+</section>
+
+<section>
+<h2>6. Architecture decision records</h2>
+<table>
+<tr><th>ID</th><th>Decision</th><th>Rationale</th><th>Consequence</th></tr>
+<tr><td>ADR-1</td><td>Use GHDL and Icarus Verilog as the simulation engines</td><td>Mature, free, cover both languages fully</td><td>Users must install them; behaviour matches what instructors' tools report</td></tr>
+<tr><td>ADR-2</td><td>Talk to the simulator through a line-based stdin/stdout protocol embedded in a generated testbench</td><td>Works identically in both simulators with no plugins (no VPI/VHPI C code)</td><td>Throughput limited (~250k cycles/s) by per-cycle checks; simple to debug</td></tr>
+<tr><td>ADR-3</td><td>Generate the testbench from the student's port list</td><td>Students keep their normal top-level; widths and types adapt automatically</td><td>Needs a lightweight port parser per language (regex based)</td></tr>
+<tr><td>ADR-4</td><td>WebSocket with request/response stepping (one batch in flight)</td><td>Natural back-pressure; UI never floods the simulator</td><td>Latency of one round trip per batch; batches grow with clock speed</td></tr>
+<tr><td>ADR-5</td><td>Report only output <em>changes</em>, capped at 256 per batch, plus final state</td><td>Keeps messages small at high clock speeds</td><td>Live waveform may skip changes at high speeds; region is shaded and VCD gives exact detail</td></tr>
+<tr><td>ADR-6</td><td>Record internal signals via simulator-native VCD, loaded on Stop</td><td>Zero custom instrumentation; standard format</td><td>Internal view is post-mortem, not live; files grow fast (40&nbsp;MB cap)</td></tr>
+<tr><td>ADR-7</td><td>Vanilla JS, no framework or build step</td><td>Easy to read and run; one <code>python3 server.py</code></td><td>Manual DOM management; fine at this size</td></tr>
+<tr><td>ADR-8</td><td>Model the DE2-115 specifically, with canonical pin names</td><td>Matches the target course's board and Quartus pin files</td><td>Other boards need a board-description abstraction later</td></tr>
+</table>
+</section>
+
+<section>
+<h2>7. Quality attributes</h2>
+<table>
+<tr><th>Attribute</th><th>Target</th><th>How the design achieves it</th></tr>
+<tr><td>Correctness</td><td>Same results as the course's simulators</td><td>Uses the real compilers; wrapper only adds a clock and I/O</td></tr>
+<tr><td>Responsiveness</td><td>Switch to LED update under ~50&nbsp;ms when paused or slow</td><td>Input change triggers an immediate 0-cycle step; 16&nbsp;ms UI tick</td></tr>
+<tr><td>Throughput</td><td>&ge;100k cycles/s on a laptop</td><td>Batching up to 250k cycles; change-only reporting</td></tr>
+<tr><td>Robustness</td><td>Bad designs never hang the UI</td><td>Compile timeout 60&nbsp;s, step timeout 20&nbsp;s, process kill, combinational-loop detection by simulator</td></tr>
+<tr><td>Debuggability</td><td>Find bugs without leaving the tool</td><td>Error line highlighting, X/U/Z shown on board, cursor values, bit expansion, VCD export</td></tr>
+<tr><td>Portability</td><td>Linux, macOS, Windows (WSL)</td><td>Pure Python + standard tools; browser front end</td></tr>
+<tr><td>Maintainability</td><td>One developer can understand all of it</td><td>~1,500 lines, 6 files, no build tooling</td></tr>
+</table>
+</section>
+
+<section>
+<h2>8. Constraints, assumptions, risks</h2>
+<table>
+<tr><th>Type</th><th>Item</th><th>Mitigation / note</th></tr>
+<tr><td>Constraint</td><td>Simulation runs far slower than 50&nbsp;MHz</td><td>Shows achieved rate; students use small divider constants in sim</td></tr>
+<tr><td>Constraint</td><td>macOS GHDL packaging (Homebrew cask disabled)</td><td>Manual install from GHDL releases documented in README</td></tr>
+<tr><td>Assumption</td><td>Top-level uses DE2-115 pin names</td><td>Aliases for clock (<code>CLK</code>, <code>CLOCK</code>); non-board ports tied off with warnings</td></tr>
+<tr><td>Risk</td><td>Running untrusted HDL on a public server</td><td>Local-only by default (binds 127.0.0.1); sandbox plan in Deployment doc</td></tr>
+<tr><td>Risk</td><td>Icarus does not trigger <code>always @(*)</code> at time 0</td><td>Documented; examples use <code>always_comb</code></td></tr>
+<tr><td>Risk</td><td>Regex port parsing misses exotic declarations</td><td>Explicit "Top" override; wrapper compile errors point at port types</td></tr>
+</table>
+</section>
+
+<footer>FPGASim &mdash; virtual DE2-115 FPGA board simulator. Diagrams are written in
+<a href="https://mermaid.js.org">Mermaid</a>; edit the text inside each
+<code>&lt;pre class="mermaid"&gt;</code> block to update them.</footer>
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose",
+  flowchart: { htmlLabels: true, curve: "basis" }, sequence: { mirrorActors: false } });
+</script>
+</body>
+</html>
