@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FPGA Board Simulator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="toolbar">
+    <div class="brand">FPGA<span>Sim</span></div>
+
+    <label>Language
+      <select id="lang">
+        <option value="vhdl">VHDL</option>
+        <option value="verilog">Verilog / SV</option>
+      </select>
+    </label>
+
+    <label>Example
+      <select id="example">
+        <option value="">-- load --</option>
+        <option value="counter">Counter + 7-seg demo</option>
+        <option value="blank">Blank DE2-115 template</option>
+      </select>
+    </label>
+
+    <label>Top
+      <input id="top" placeholder="auto" size="8">
+    </label>
+
+    <label class="check" title="Record every internal signal to a VCD file. Shown in the Waveform tab when you press Stop.">
+      <input type="checkbox" id="recordVcd"> Record internal signals
+    </label>
+
+    <button id="btnCompile" class="primary" title="Ctrl+Enter">&#9654; Compile &amp; Load</button>
+
+    <div class="sep"></div>
+
+    <button id="btnRun" disabled>Run</button>
+    <button id="btnStep" disabled title="Advance one clock cycle">Step</button>
+    <input id="stepN" type="number" value="1" min="1" class="small-num" title="Cycles per Step">
+    <label>Clock
+      <select id="speed">
+        <option value="1">1 Hz</option>
+        <option value="2">2 Hz</option>
+        <option value="10">10 Hz</option>
+        <option value="100" selected>100 Hz</option>
+        <option value="1000">1 kHz</option>
+        <option value="10000">10 kHz</option>
+        <option value="100000">100 kHz</option>
+        <option value="1000000">1 MHz</option>
+        <option value="50000000">50 MHz (as fast as possible)</option>
+      </select>
+    </label>
+    <button id="btnStop" disabled>Stop</button>
+
+    <div class="status" id="status"><span class="dot"></span><span id="statusText">connecting...</span></div>
+  </header>
+
+  <main class="layout">
+    <section class="editor-pane">
+      <div class="pane-title">
+        <span id="fileName">design.vhd</span>
+        <span class="hint">Ctrl+Enter to compile</span>
+      </div>
+      <div id="editor"></div>
+    </section>
+
+    <section class="board-pane">
+      <div class="pane-title">
+        <span>Board</span>
+        <span class="hint" id="simInfo">not loaded</span>
+      </div>
+      <div id="board"></div>
+    </section>
+
+    <section class="bottom-pane">
+      <div class="tabs">
+        <button class="tab active" data-tab="wave">Waveform</button>
+        <button class="tab" data-tab="console">Console <span id="consoleBadge" class="badge hidden"></span></button>
+        <div class="tab-tools" id="waveTools">
+          <select id="waveSource">
+            <option value="live">Live: board I/O</option>
+            <option value="vcd" disabled>Recorded: all signals (VCD)</option>
+          </select>
+          <button id="btnSignals" class="hidden">Signals...</button>
+          <label class="check"><input type="checkbox" id="follow" checked> Follow</label>
+          <select id="radix">
+            <option value="hex">Hex</option>
+            <option value="dec">Dec</option>
+            <option value="bin">Bin</option>
+          </select>
+          <button id="zoomIn" title="Zoom in">+</button>
+          <button id="zoomOut" title="Zoom out">&minus;</button>
+          <button id="zoomFit" title="Fit all">Fit</button>
+          <button id="clearWave" title="Clear live history">Clear</button>
+          <button id="downloadVcd" class="hidden">Download .vcd</button>
+        </div>
+      </div>
+      <div class="tab-body" id="tab-wave">
+        <div class="wave-wrap"><canvas id="wave"></canvas></div>
+        <div class="signal-picker hidden" id="signalPicker">
+          <input id="signalFilter" placeholder="filter signals...">
+          <div id="signalList"></div>
+        </div>
+      </div>
+      <div class="tab-body hidden" id="tab-console">
+        <div id="console"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/vhdl/vhdl.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/verilog/verilog.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+  <script src="/static/board.js"></script>
+  <script src="/static/wave.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
